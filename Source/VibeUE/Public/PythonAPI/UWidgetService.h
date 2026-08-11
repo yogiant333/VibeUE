@@ -116,6 +116,52 @@ struct FWidgetSlotInfo
 };
 
 /**
+ * Strongly typed layout properties stored on the widget itself rather than its parent slot.
+ *
+ * Examples:
+ * - SizeBox width/height overrides
+ * - Border content padding and child alignment
+ */
+USTRUCT(BlueprintType)
+struct FWidgetLayoutInfo
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	bool bOverrideWidth = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	float Width = 0.0f;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	bool bOverrideHeight = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	float Height = 0.0f;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	bool bOverrideMinDesiredWidth = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	float MinDesiredWidth = 0.0f;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	bool bOverrideMinDesiredHeight = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	float MinDesiredHeight = 0.0f;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	FMargin Padding;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	TEnumAsByte<EHorizontalAlignment> HorizontalAlignment = HAlign_Fill;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Widget")
+	TEnumAsByte<EVerticalAlignment> VerticalAlignment = VAlign_Fill;
+};
+
+/**
  * Full state snapshot of a single widget component.
  * Combines hierarchy info, slot layout, and all properties in one struct.
  */
@@ -692,6 +738,29 @@ public:
 		const FString& PropertyValue);
 
 	/**
+	 * Set concrete slot layout data for a widget component.
+	 *
+	 * Supports CanvasPanelSlot, VerticalBoxSlot, HorizontalBoxSlot, and OverlaySlot.
+	 * This is more reliable than setting nested slot properties through string paths.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets|Slot")
+	static bool SetSlotInfo(
+		const FString& WidgetPath,
+		const FString& ComponentName,
+		const FWidgetSlotInfo& SlotInfo);
+
+	/**
+	 * Set concrete widget-owned layout data.
+	 *
+	 * Supports SizeBox and Border. Parent slot layout should still use SetSlotInfo.
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets|Layout")
+	static bool SetLayoutInfo(
+		const FString& WidgetPath,
+		const FString& ComponentName,
+		const FWidgetLayoutInfo& LayoutInfo);
+
+	/**
 	 * List all editable properties of a widget component.
 	 * Maps to action="list_properties"
 	 *
@@ -1061,6 +1130,18 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets|Exists")
 	static bool WidgetBlueprintExists(const FString& WidgetPath);
+
+	/**
+	 * Create a Widget Blueprint asset if it does not already exist.
+	 *
+	 * @param WidgetPath - Package path or object path, e.g. /Game/UI/WBP_Test or /Game/UI/WBP_Test.WBP_Test
+	 * @param ParentClassPath - Optional parent UserWidget class path, defaults to UUserWidget
+	 * @return Resolved object path of the Widget Blueprint, or empty on failure
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "VibeUE|Widgets|Create")
+	static FString CreateWidgetBlueprint(
+		const FString& WidgetPath,
+		const FString& ParentClassPath = TEXT(""));
 
 	/**
 	 * Check if a widget component exists in a Widget Blueprint.
