@@ -1,5 +1,6 @@
 // Copyright Buckley Builds LLC 2026 All Rights Reserved.
 
+using System.IO;
 using UnrealBuildTool;
 
 public class VibeUE : ModuleRules
@@ -23,7 +24,32 @@ public class VibeUE : ModuleRules
 		// Keep all other module warnings as errors while suppressing deprecation
 		// diagnostics inherited from engine headers.
 		CppCompileWarningSettings.DeprecationWarningLevel = WarningLevel.Off;
-		
+
+		// FabService (issue #517) talks to fab.com via the signed-in Epic account's EOS auth token,
+		// reusing the login the editor/launcher already holds. EOSSDK provides the SDK headers and the
+		// WITH_EOS_SDK=1 define; EOSShared provides IEOSSDKManager. bRequiresPlatformSDK mirrors the
+		// engine Fab plugin's own Build.cs so the platform SDK is available.
+		//
+		// Some engine installs ship without the Fab plugin entirely (issue #525), so all of this is
+		// conditional on it existing: without it, WITH_VIBEUE_FAB=0 compiles FabService down to stubs
+		// that report the feature as unavailable, and the rest of VibeUE builds normally.
+		bool bFabPluginPresent = File.Exists(
+			Path.Combine(EngineDirectory, "Plugins", "Fab", "Fab.uplugin"));
+		PrivateDefinitions.Add("WITH_VIBEUE_FAB=" + (bFabPluginPresent ? "1" : "0"));
+		if (bFabPluginPresent)
+		{
+			bRequiresPlatformSDK = true;
+			PrivateDependencyModuleNames.AddRange(
+				new string[]
+				{
+					"EOSSDK",                 // FabService (#517): Epic Online Services SDK — headers + WITH_EOS_SDK=1 for Fab auth token
+					"EOSShared",              // FabService (#517): IEOSSDKManager (create/enumerate + auto-tick EOS platforms)
+					"Fab",                    // FabService (#517): reuse the engine Fab plugin's FAB_API downloader (FFabDownloadRequest / queue)
+					"FileUtilities",          // FabService: safely extract public free-asset ZIP downloads
+				}
+			);
+		}
+
 		// Ensure proper debug symbol generation for PDB files
 		if (Target.Configuration == UnrealTargetConfiguration.Debug || 
 		    Target.Configuration == UnrealTargetConfiguration.DebugGame ||

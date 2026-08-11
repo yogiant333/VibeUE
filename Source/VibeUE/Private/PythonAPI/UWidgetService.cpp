@@ -723,6 +723,41 @@ namespace
 		return Property->ImportText_Direct(*PropertyValue, ValuePtr, Object, PPF_None) != nullptr;
 	}
 
+	// UMG "optional override" values (USizeBox::WidthOverride/HeightOverride/MinDesiredWidth/…,
+	// UImage aspect-ratio overrides, etc.) are inert unless their companion bOverride_<Name> bool
+	// is also set — that bool is the "checkbox" the UMG designer ticks for you. Writing only the
+	// value field silently no-ops: the layout engine keeps ignoring it (e.g. a SizeBox width that
+	// never clamps, so the box fills its parent). Whenever we set such a value directly on an
+	// object, raise the matching bOverride_ companion so the intent actually applies. (issue #508)
+	void RaiseOverrideCompanionIfPresent(UObject* Object, const FProperty* ValueProperty)
+	{
+		if (!Object || !ValueProperty)
+		{
+			return;
+		}
+
+		// Only direct object members carry a bOverride_ companion; struct-nested fields
+		// (e.g. WidgetStyle.Normal.TintColor) don't, and GetOwnerClass() is null for those.
+		UClass* OwnerClass = ValueProperty->GetOwnerClass();
+		if (!OwnerClass || !Object->GetClass()->IsChildOf(OwnerClass))
+		{
+			return;
+		}
+
+		const FString CompanionName = FString(TEXT("bOverride_")) + ValueProperty->GetName();
+		FBoolProperty* OverrideFlag = FindFProperty<FBoolProperty>(Object->GetClass(), *CompanionName);
+		if (!OverrideFlag)
+		{
+			return;
+		}
+
+		void* FlagPtr = OverrideFlag->ContainerPtrToValuePtr<void>(Object);
+		if (!OverrideFlag->GetPropertyValue(FlagPtr))
+		{
+			OverrideFlag->SetPropertyValue(FlagPtr, true);
+		}
+	}
+
 	FString GetLastPathSegment(const FString& PropertyPath)
 	{
 		FString Left;
@@ -1492,7 +1527,8 @@ FWidgetAddComponentResult UWidgetService::AddComponent(
 	const FString& ComponentType,
 	const FString& ComponentName,
 	const FString& ParentName,
-	bool bIsVariable)
+	bool bIsVariable,
+	int32 ChildIndex)
 {
 	FWidgetAddComponentResult Result;
 	
@@ -1552,6 +1588,29 @@ FWidgetAddComponentResult UWidgetService::AddComponent(
 		ParentPanel = Cast<UPanelWidget>(WidgetBP->WidgetTree->RootWidget);
 	}
 
+	// Validate ChildIndex up front rather than silently falling back to append or to setting the root: -1 means
+	// append, [0, GetChildrenCount()] means insert at that position, anything else is an explicit error - this
+	// must fire even when ParentPanel is null (e.g. no root widget exists yet), since a non-default ChildIndex
+	// has nothing to insert into there and would otherwise silently be ignored by the set-as-root fallback below
+	if (ChildIndex != -1)
+	{
+		if (!ParentPanel)
+		{
+			Result.ErrorMessage = FString::Printf(
+				TEXT("ChildIndex %d was specified, but there is no panel parent to insert into (ChildIndex requires an existing panel parent)"),
+				ChildIndex);
+			return Result;
+		}
+
+		if (ChildIndex < 0 || ChildIndex > ParentPanel->GetChildrenCount())
+		{
+			Result.ErrorMessage = FString::Printf(
+				TEXT("ChildIndex %d is out of range for parent '%s' (valid range: -1 to append, or 0-%d to insert)"),
+				ChildIndex, *ParentPanel->GetName(), ParentPanel->GetChildrenCount());
+			return Result;
+		}
+	}
+
 	// Create the new widget
 	UWidget* NewWidget = WidgetBP->WidgetTree->ConstructWidget<UWidget>(WidgetClass, FName(*ComponentName));
 	if (!NewWidget)
@@ -1569,10 +1628,10 @@ FWidgetAddComponentResult UWidgetService::AddComponent(
 		WidgetBP->WidgetVariableNameToGuidMap.Add(WidgetFName, FGuid::NewGuid());
 	}
 
-	// Add to parent or set as root
+	// Add to parent or set as root - ChildIndex was already validated above, so it's either -1 (append) or a valid index
 	if (ParentPanel)
 	{
-		UPanelSlot* Slot = ParentPanel->AddChild(NewWidget);
+		UPanelSlot* Slot = (ChildIndex >= 0) ? ParentPanel->InsertChildAt(ChildIndex, NewWidget) : ParentPanel->AddChild(NewWidget);
 		if (!Slot)
 		{
 			Result.ErrorMessage = TEXT("Failed to add widget to parent panel");
@@ -1615,6 +1674,50 @@ FWidgetAddComponentResult UWidgetService::AddComponent(
 	Result.bIsVariable = bIsVariable;
 
 	return Result;
+}
+
+bool UWidgetService::ReorderComponent(
+	const FString& WidgetPath,
+	const FString& ComponentName,
+	int32 NewIndex)
+{
+	UWidgetBlueprint* WidgetBP = LoadWidgetBlueprint(WidgetPath);
+	if (!WidgetBP || !WidgetBP->WidgetTree)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UWidgetService::ReorderComponent: Widget Blueprint '%s' not found"), *WidgetPath);
+		return false;
+	}
+
+	UWidget* Widget = FindWidgetByName(WidgetBP, ComponentName);
+	if (!Widget)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UWidgetService::ReorderComponent: Widget '%s' not found"), *ComponentName);
+		return false;
+	}
+
+	UPanelWidget* ParentPanel = Widget->GetParent();
+	if (!ParentPanel)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UWidgetService::ReorderComponent: '%s' has no panel parent (the root widget cannot be reordered)"), *ComponentName);
+		return false;
+	}
+
+	if (NewIndex < 0 || NewIndex >= ParentPanel->GetChildrenCount())
+	{
+		UE_LOG(LogTemp, Warning, TEXT("UWidgetService::ReorderComponent: NewIndex %d is out of range for parent '%s' (valid range: 0-%d)"),
+			NewIndex, *ParentPanel->GetName(), ParentPanel->GetChildrenCount() - 1);
+		return false;
+	}
+
+	WidgetBP->Modify();
+	// ShiftChild rewrites ParentPanel->Slots directly, so the panel is the object whose state changes.
+	ParentPanel->Modify();
+	ParentPanel->ShiftChild(NewIndex, Widget);
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WidgetBP);
+
+	UE_LOG(LogTemp, Log, TEXT("UWidgetService::ReorderComponent: Moved '%s' to index %d under '%s'"),
+		*ComponentName, NewIndex, *ParentPanel->GetName());
+	return true;
 }
 
 FWidgetRemoveComponentResult UWidgetService::RemoveComponent(
@@ -1865,6 +1968,10 @@ bool UWidgetService::SetProperty(
 		UE_LOG(LogTemp, Warning, TEXT("UWidgetService::SetProperty: Failed to parse value '%s' for property '%s'"), *PropertyValue, *PropertyName);
 		return false;
 	}
+
+	// An override value alone is ignored unless its bOverride_ companion is set — flip it so the
+	// value takes effect (e.g. SizeBox WidthOverride actually clamps instead of no-op'ing).
+	RaiseOverrideCompanionIfPresent(Resolved.TargetObject, Resolved.Property);
 
 	Resolved.TargetObject->Modify();
 	// If we wrote to the widget's slot (layout/alignment/z-order), the change is structural —

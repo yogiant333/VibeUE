@@ -22,7 +22,9 @@
 			"Type": "Editor",
 			"LoadingPhase": "Default",
 			"WhitelistPlatforms": [
-				"Win64"
+				"Win64",
+				"Linux",
+				"Mac"
 			]
 		}
 	],
@@ -70,6 +72,16 @@
 		{
 			"Name": "ModelContextProtocol",
 			"Enabled": true
+		},
+		{
+			"Name": "Fab",
+			"Enabled": true,
+			"Optional": true
+		},
+		{
+			"Name": "EOSShared",
+			"Enabled": true,
+			"Optional": true
 		}
 	]
-} 
+}

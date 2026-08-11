@@ -6,6 +6,7 @@
 #include "Editor.h"
 #include "Core/ToolRegistry.h"
 #include "HAL/IConsoleManager.h"
+#include "HAL/PlatformProcess.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Tools/PythonTools.h"
@@ -13,9 +14,11 @@
 #include "ToolsetRegistry/UToolsetRegistry.h"
 #include "ToolsetRegistry/ToolsetDefinition.h"
 #include "Core/VibeUEMCPToolBridge.h"
+#include "IModelContextProtocolModule.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UObjectIterator.h"
 #include "Utils/VibeUEPaths.h"
+#include "Utils/VibeUEReadinessSignal.h"
 #include "Misc/Paths.h"
 #include "Misc/FileHelper.h"
 
@@ -122,7 +125,7 @@ static FAutoConsoleCommandWithArgsAndOutputDevice TestToolCommand(
 // path is the whole reason this command exists.
 //
 // Each agent expects a different memory file, and only Claude Code (CLAUDE.md) and Gemini
-// CLI (GEMINI.md) resolve `@path` imports — Codex (AGENTS.md), Cursor (AGENTS.md) and
+// CLI (GEMINI.md) resolve `@path` imports — Codex/Hermes (AGENTS.md), Cursor (AGENTS.md) and
 // Copilot do not. So the default COPIES the guide in (universal); pass "import" to instead
 // write a one-line `@<resolved sample path>` for the two agents that support it (others
 // fall back to copy). Copilot also reads AGENTS.md/CLAUDE.md/GEMINI.md, so "All" covers it.
@@ -173,7 +176,7 @@ static void GenerateVibeUEAgentConfig(const TArray<FString>& Args, FOutputDevice
 	{
 		Targets.Add(TPair<FString, bool>(TEXT(".github/copilot-instructions.md"), false));
 	}
-	else if (Client == TEXT("codex") || Client == TEXT("cursor") || Client == TEXT("agents") || Client == TEXT("agent"))
+	else if (Client == TEXT("codex") || Client == TEXT("hermes") || Client == TEXT("cursor") || Client == TEXT("agents") || Client == TEXT("agent"))
 	{
 		Targets.Add(TPair<FString, bool>(TEXT("AGENTS.md"), false));
 	}
@@ -181,11 +184,11 @@ static void GenerateVibeUEAgentConfig(const TArray<FString>& Args, FOutputDevice
 	{
 		Targets.Add(TPair<FString, bool>(TEXT("CLAUDE.md"), true));   // Claude Code
 		Targets.Add(TPair<FString, bool>(TEXT("GEMINI.md"), true));   // Gemini CLI
-		Targets.Add(TPair<FString, bool>(TEXT("AGENTS.md"), false));  // Codex, Cursor (and Copilot reads it too)
+		Targets.Add(TPair<FString, bool>(TEXT("AGENTS.md"), false));  // Codex, Hermes, Cursor (and Copilot reads it too)
 	}
 	else
 	{
-		Ar.Logf(TEXT("VibeUE.GenerateAgentConfig: unknown client '%s'. Use: ClaudeCode | Gemini | Codex | Cursor | Copilot | All."), *Client);
+		Ar.Logf(TEXT("VibeUE.GenerateAgentConfig: unknown client '%s'. Use: ClaudeCode | Gemini | Codex | Hermes | Cursor | Copilot | All."), *Client);
 		return;
 	}
 
@@ -279,14 +282,15 @@ static void GenerateVibeUEAgentConfig(const TArray<FString>& Args, FOutputDevice
 		}
 	}
 
+	const FString McpConfigClient = (Client == TEXT("hermes")) ? TEXT("Codex") : ((Args.Num() > 0) ? Args[0] : TEXT("All"));
 	Ar.Logf(TEXT("VibeUE.GenerateAgentConfig: done (source: %s). Tip: also run 'ModelContextProtocol.GenerateClientConfig %s' to write .mcp.json."),
-		*SamplePath, (Args.Num() > 0) ? *Args[0] : TEXT("All"));
+		*SamplePath, *McpConfigClient);
 }
 
 static FAutoConsoleCommandWithArgsAndOutputDevice GenerateAgentConfigCommand(
 	TEXT("VibeUE.GenerateAgentConfig"),
 	TEXT("Write the VibeUE agent guide to the project root from the bundled sample. ")
-	TEXT("Usage: VibeUE.GenerateAgentConfig [ClaudeCode|Gemini|Codex|Cursor|Copilot|All] [import]. ")
+	TEXT("Usage: VibeUE.GenerateAgentConfig [ClaudeCode|Gemini|Codex|Hermes|Cursor|Copilot|All] [import]. ")
 	TEXT("Default All -> CLAUDE.md + GEMINI.md + AGENTS.md. 'import' writes a one-line @import for Claude/Gemini (others copy)."),
 	FConsoleCommandWithArgsAndOutputDeviceDelegate::CreateStatic(GenerateVibeUEAgentConfig)
 );
@@ -361,6 +365,10 @@ static void GatherVibeUEToolsetClasses(TArray<UClass*>& OutClasses)
 
 void FModule::RegisterToolsets()
 {
+	// A reused process ID must not inherit a stale signal from an unclean Editor exit. This runs late
+	// in startup, so BuildAndLaunchGame also clears the file right after launch — see the script.
+	FVibeUEReadinessSignal::Remove();
+
 	// Service layer -> Epic's ToolsetRegistry (AICallable tools).
 	if (UToolsetRegistry::IsAvailable())
 	{
@@ -379,10 +387,40 @@ void FModule::RegisterToolsets()
 
 	// Dynamic FToolRegistry tools -> Epic's MCP endpoint (independent of ToolsetRegistry).
 	VibeUEMCPToolBridge::RegisterAll();
+
+	// ModelContextProtocol.RefreshTools drops every registered MCP tool and broadcasts
+	// OnRefreshTools for providers to re-add themselves (Epic's editor module does this for
+	// ToolsetRegistry adapters, so the service toolsets above survive on their own). Without
+	// this subscription the bridged tools stay gone until the next editor restart.
+	if (IModelContextProtocolModule* MCPModule = IModelContextProtocolModule::Get();
+		MCPModule && !OnRefreshToolsHandle.IsValid())
+	{
+		OnRefreshToolsHandle = MCPModule->OnRefreshTools().AddRaw(this, &FModule::HandleMCPRefreshTools);
+	}
+
+	// Reaching the end of RegisterToolsets is the complete readiness contract.
+	FVibeUEReadinessSignal::Publish();
+}
+
+void FModule::HandleMCPRefreshTools()
+{
+	// RefreshTools already emptied the MCP module's tool list; UnregisterAll() only clears
+	// the bridge's now-stale tracking list so RegisterAll() starts from a clean slate.
+	VibeUEMCPToolBridge::UnregisterAll();
+	VibeUEMCPToolBridge::RegisterAll();
 }
 
 void FModule::UnregisterToolsets()
 {
+	if (OnRefreshToolsHandle.IsValid())
+	{
+		if (IModelContextProtocolModule* MCPModule = IModelContextProtocolModule::Get())
+		{
+			MCPModule->OnRefreshTools().Remove(OnRefreshToolsHandle);
+		}
+		OnRefreshToolsHandle.Reset();
+	}
+
 	VibeUEMCPToolBridge::UnregisterAll();
 
 	if (UToolsetRegistry::IsAvailable())
@@ -398,6 +436,8 @@ void FModule::UnregisterToolsets()
 
 void FModule::ShutdownModule()
 {
+	FVibeUEReadinessSignal::Remove();
+
 	if (!bServicesInitialized)
 	{
 		UE_LOG(LogTemp, Display, TEXT("VibeUE Module has shut down"));
@@ -420,6 +460,7 @@ void FModule::ShutdownModule()
 void FModule::OnPreExit()
 {
 	UE_LOG(LogTemp, Display, TEXT("VibeUE OnPreExit - cleaning up Python services"));
+	FVibeUEReadinessSignal::Remove();
 	
 	// Release all C++ Python service instances
 	// This is safe because we're just clearing our own pointers
