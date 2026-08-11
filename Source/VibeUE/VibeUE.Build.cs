@@ -17,6 +17,12 @@ public class VibeUE : ModuleRules
 		// engine APIs) fail the build here instead of surfacing only on contributors'
 		// clean installs. See PR #438.
 		bWarningsAsErrors = true;
+		// UE 5.8's editor headers still expose several deprecated compatibility
+		// overrides. They produce C4996 in any consumer even when VibeUE never calls
+		// the deprecated API, and /WX then promotes those engine warnings to C2220.
+		// Keep all other module warnings as errors while suppressing deprecation
+		// diagnostics inherited from engine headers.
+		CppCompileWarningSettings.DeprecationWarningLevel = WarningLevel.Off;
 		
 		// Ensure proper debug symbol generation for PDB files
 		if (Target.Configuration == UnrealTargetConfiguration.Debug || 
@@ -135,4 +141,4 @@ public class VibeUE : ModuleRules
 			}
 		);
 	}
-} 
+}
